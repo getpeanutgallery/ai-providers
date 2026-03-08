@@ -6,6 +6,6 @@
   "repository": "https://github.com/getpeanutgallery/ai-providers",
   "dependencies": {
     "axios": "^1.13.6",
-    "digital-twin-router": "file:../digital-twin-router"
+    "digital-twin-router": "git+ssh://git@github.com/getpeanutgallery/digital-twin-router.git#main"
   }
 }
