@@ -1,0 +1,11 @@
+{
+  "name": "ai-providers",
+  "version": "1.0.0",
+  "description": "AI provider interface implementations for Emotion Engine",
+  "main": "ai-provider-interface.js",
+  "repository": "https://github.com/getpeanutgallery/ai-providers",
+  "dependencies": {
+    "axios": "^1.13.6",
+    "digital-twin-router": "file:../digital-twin-router"
+  }
+}
