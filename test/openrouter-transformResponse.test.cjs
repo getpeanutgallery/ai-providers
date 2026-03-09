@@ -169,3 +169,43 @@ test('openrouter.wrapTransportError: wraps axios error and does not include raw 
   // Value is redacted either via key-based replacement or string redaction.
   assert.ok(body.includes('[REDACTED]'));
 });
+
+test('openrouter.wrapTransportError: preserves existing debug.response when new payload has no axios response', () => {
+  const request = {
+    method: 'POST',
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    headers: {
+      Authorization: 'Bearer SECRET_TOKEN_SHOULD_NOT_LEAK',
+      'Content-Type': 'application/json',
+    },
+    body: {
+      model: 'test-model',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    },
+  };
+
+  // Simulate the error thrown by transformResponse, which already has debug built from an axiosResponse.
+  const err = new Error('OpenRouter: No content in response');
+  err.name = 'OpenRouterNoContentError';
+  err.debug = {
+    provider: 'openrouter',
+    response: {
+      status: 200,
+      headers: { 'x-request-id': 'req_123' },
+      body: '{"choices":[{"message":{}}]}',
+    },
+  };
+
+  // Now simulate runRequest's catch calling wrapTransportError(err, request).
+  // buildDebugPayload({ axiosError: err }) has no .response, so it must not blank existing debug.response.
+  const wrapped = provider._private.wrapTransportError(err, request);
+
+  assert.equal(wrapped, err);
+  assert.ok(wrapped.debug);
+  assert.equal(wrapped.debug.response.status, 200);
+  assert.equal(wrapped.debug.response.headers['x-request-id'], 'req_123');
+  assert.equal(wrapped.debug.response.body, '{"choices":[{"message":{}}]}');
+
+  // It should still enrich request meta.
+  assert.equal(wrapped.debug.request.model, 'test-model');
+});

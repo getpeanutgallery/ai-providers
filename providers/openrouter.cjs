@@ -152,15 +152,23 @@ function sanitizeRequestMeta(request) {
 function buildDebugPayload({ request, axiosResponse, axiosError } = {}) {
   const response = axiosResponse || axiosError?.response;
 
-  return {
+  // Important: if we don't actually have a response, do NOT include an empty/undefined
+  // response payload. Otherwise, attachDebug's merge will overwrite any existing
+  // err.debug.response.{status,headers,body} with undefined/empty values.
+  const payload = {
     provider: name,
     request: sanitizeRequestMeta(request),
-    response: {
-      status: response?.status,
-      headers: pickRequestIdLikeHeaders(response?.headers),
-      body: safeJsonSnippet(response?.data, DEBUG_BODY_MAX_CHARS),
-    },
   };
+
+  if (response) {
+    payload.response = {
+      status: response.status,
+      headers: pickRequestIdLikeHeaders(response.headers),
+      body: safeJsonSnippet(response.data, DEBUG_BODY_MAX_CHARS),
+    };
+  }
+
+  return payload;
 }
 
 function attachDebug(err, debugPayload) {
