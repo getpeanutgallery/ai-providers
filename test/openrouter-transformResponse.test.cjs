@@ -3,8 +3,8 @@ const assert = require('node:assert/strict');
 
 const provider = require('../providers/openrouter.cjs');
 
-function wrap(data) {
-  return { data };
+function wrap(data, { status = 200, headers = {} } = {}) {
+  return { data, status, headers };
 }
 
 test('openrouter.transformResponse: string message.content', () => {
@@ -55,8 +55,117 @@ test('openrouter.transformResponse: falls back to message.audio.transcript when 
   assert.equal(res.content, 'transcribed speech');
 });
 
-test('openrouter.transformResponse: throws when neither content nor transcript available', () => {
-  assert.throws(() => {
-    provider._private.transformResponse(wrap({ choices: [{ message: {} }] }));
-  }, /No content in response/);
+test('openrouter.transformResponse: throws with debug payload when neither content nor transcript available', () => {
+  const request = {
+    method: 'POST',
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    headers: {
+      Authorization: 'Bearer SECRET_TOKEN_SHOULD_NOT_LEAK',
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://example.com',
+    },
+    body: {
+      model: 'test-model',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'hi' },
+            {
+              type: 'image_url',
+              image_url: { url: 'data:image/jpeg;base64,AAAAAA' },
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  const response = wrap(
+    {
+      choices: [{ message: {} }],
+      note: 'Bearer SUPER_SECRET_SHOULD_NOT_LEAK',
+      key: 'sk-123456789012345678901234567890',
+      big: 'x'.repeat(9000),
+    },
+    {
+      status: 200,
+      headers: {
+        'x-request-id': 'req_123',
+        'cf-ray': 'cf_456',
+        'set-cookie': 'session=should_not_be_in_debug',
+      },
+    }
+  );
+
+  try {
+    provider._private.transformResponse(response, request);
+    assert.fail('expected transformResponse to throw');
+  } catch (err) {
+    assert.match(err.message, /No content in response/);
+
+    assert.ok(err.debug);
+    assert.equal(err.debug.provider, 'openrouter');
+
+    // Response info
+    assert.equal(err.debug.response.status, 200);
+    assert.equal(err.debug.response.headers['x-request-id'], 'req_123');
+    assert.equal(err.debug.response.headers['cf-ray'], 'cf_456');
+    assert.ok(!('set-cookie' in err.debug.response.headers));
+
+    // Request info (sanitized)
+    assert.equal(err.debug.request.model, 'test-model');
+    assert.deepEqual(err.debug.request.contentTypes.sort(), ['image_url', 'text']);
+    assert.ok(!('authorization' in (err.debug.request.headers || {})));
+
+    // Body snippet redaction + truncation
+    const body = err.debug.response.body;
+    assert.ok(typeof body === 'string' && body.length > 0);
+    assert.ok(body.length <= 8300);
+    assert.ok(!body.includes('SUPER_SECRET_SHOULD_NOT_LEAK'));
+    assert.ok(!body.includes('SECRET_TOKEN_SHOULD_NOT_LEAK'));
+    assert.ok(!body.includes('sk-123456789012345678901234567890'));
+    assert.ok(body.includes('Bearer [REDACTED]'));
+    assert.ok(body.includes('sk-[REDACTED]'));
+    // Note: request body is not included in response debug snippet.
+    assert.ok(body.includes('...[truncated'));
+  }
+});
+
+test('openrouter.wrapTransportError: wraps axios error and does not include raw axios config', () => {
+  const request = {
+    method: 'POST',
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    headers: {
+      Authorization: 'Bearer SECRET_TOKEN_SHOULD_NOT_LEAK',
+      'Content-Type': 'application/json',
+    },
+    body: {
+      model: 'test-model',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    },
+  };
+
+  const axiosErr = new Error('Request failed with status code 401');
+  axiosErr.isAxiosError = true;
+  axiosErr.config = { headers: { Authorization: 'Bearer LEAKY' } };
+  axiosErr.response = {
+    status: 401,
+    headers: { 'x-request-id': 'req_401' },
+    data: { error: { message: 'unauthorized', authorization: 'Bearer ALSO_LEAKY' } },
+  };
+
+  const wrapped = provider._private.wrapTransportError(axiosErr, request);
+
+  assert.match(wrapped.message, /^OpenRouter:/);
+  assert.equal(wrapped.name, 'OpenRouterError');
+  assert.ok(wrapped.debug);
+  assert.equal(wrapped.debug.response.status, 401);
+  assert.equal(wrapped.debug.response.headers['x-request-id'], 'req_401');
+  assert.ok(!('config' in wrapped));
+
+  const body = wrapped.debug.response.body;
+  assert.ok(!body.includes('LEAKY'));
+  // Value is redacted either via key-based replacement or string redaction.
+  assert.ok(body.includes('[REDACTED]'));
 });
