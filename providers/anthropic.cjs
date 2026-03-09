@@ -11,6 +11,7 @@
 const axios = require('axios');
 const path = require('path');
 const { processAttachment } = require('../utils/file-utils.cjs');
+const { wrapTransportError, attachResponseDebugAndRethrow } = require('../utils/provider-debug.cjs');
 
 /**
  * Provider name identifier
@@ -148,16 +149,27 @@ function transformResponse(axiosResponse) {
  * Create the real transport function
  * @returns {Function} (request) => Promise<result>
  */
-function makeRealTransport() {
-  return async (request) => {
+async function runRequest(request) {
+  try {
     const response = await axios({
       method: request.method,
       url: request.url,
       headers: request.headers,
-      data: request.body
+      data: request.body,
     });
-    return transformResponse(response);
-  };
+
+    try {
+      return transformResponse(response);
+    } catch (err) {
+      attachResponseDebugAndRethrow(err, { provider: name, request, axiosResponse: response });
+    }
+  } catch (err) {
+    throw wrapTransportError(err, { provider: name, request });
+  }
+}
+
+function makeRealTransport() {
+  return async (request) => runRequest(request);
 }
 
 /**
@@ -187,17 +199,16 @@ async function complete(options) {
       mode,
       twinPack,
       realTransport: makeRealTransport(),
-      engineOptions: { normalizerOptions: { ignoreQuery: true } }
+      engineOptions: { normalizerOptions: { ignoreQuery: true } },
     });
-    return await transport.complete(request);
+
+    try {
+      return await transport.complete(request);
+    } catch (err) {
+      throw wrapTransportError(err, { provider: name, request });
+    }
   } else {
-    const response = await axios({
-      method: request.method,
-      url: request.url,
-      headers: request.headers,
-      data: request.body
-    });
-    return transformResponse(response);
+    return await runRequest(request);
   }
 }
 

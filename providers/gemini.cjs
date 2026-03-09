@@ -11,6 +11,7 @@
 const axios = require('axios');
 const path = require('path');
 const { processAttachment } = require('../utils/file-utils.cjs');
+const { wrapTransportError, attachResponseDebugAndRethrow } = require('../utils/provider-debug.cjs');
 
 /**
  * Provider name identifier
@@ -143,17 +144,28 @@ function transformResponse(axiosResponse, originalPrompt) {
  * Create the real transport function
  * @returns {Function} (request) => Promise<result>
  */
-function makeRealTransport(originalPrompt) {
-  return async (request) => {
+async function runRequest(request, originalPrompt) {
+  try {
     // For Gemini, URL already contains API key
     const response = await axios({
       method: request.method,
       url: request.url,
       headers: request.headers,
-      data: request.body
+      data: request.body,
     });
-    return transformResponse(response, originalPrompt);
-  };
+
+    try {
+      return transformResponse(response, originalPrompt);
+    } catch (err) {
+      attachResponseDebugAndRethrow(err, { provider: name, request, axiosResponse: response });
+    }
+  } catch (err) {
+    throw wrapTransportError(err, { provider: name, request });
+  }
+}
+
+function makeRealTransport(originalPrompt) {
+  return async (request) => runRequest(request, originalPrompt);
 }
 
 /**
@@ -182,17 +194,16 @@ async function complete(options) {
       mode,
       twinPack,
       realTransport: makeRealTransport(options.prompt),
-      engineOptions: { normalizerOptions: { ignoreQuery: true } }
+      engineOptions: { normalizerOptions: { ignoreQuery: true } },
     });
-    return await transport.complete(request);
+
+    try {
+      return await transport.complete(request);
+    } catch (err) {
+      throw wrapTransportError(err, { provider: name, request });
+    }
   } else {
-    const response = await axios({
-      method: request.method,
-      url: request.url,
-      headers: request.headers,
-      data: request.body
-    });
-    return transformResponse(response, options.prompt);
+    return await runRequest(request, options.prompt);
   }
 }
 
