@@ -114,6 +114,14 @@ function buildRequest(options) {
     messages,
   };
 
+  // Common OpenAI-compatible parameters supported by OpenRouter
+  if (providerOptions.temperature !== undefined) {
+    requestBody.temperature = providerOptions.temperature;
+  }
+  if (providerOptions.maxTokens) {
+    requestBody.max_tokens = providerOptions.maxTokens;
+  }
+
   if (providerOptions.siteUrl) {
     requestBody.site_url = providerOptions.siteUrl;
   }
@@ -143,9 +151,53 @@ function buildRequest(options) {
  * @param {Object} axiosResponse - Axios response object
  * @returns {Object} { content, usage: { input, output, total } }
  */
+function extractTextFromContent(content) {
+  // OpenRouter (and upstream OpenAI-compatible APIs) may return:
+  // - string
+  // - array of typed parts: [{ type: 'text', text: '...' }, ...]
+  // - single typed part object
+  if (typeof content === 'string') return content;
+
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (!part || typeof part !== 'object') return '';
+        if (part.type === 'text' || part.type === 'output_text' || part.type === 'input_text') {
+          return typeof part.text === 'string' ? part.text : '';
+        }
+        if (part.type === 'refusal') {
+          return typeof part.refusal === 'string' ? part.refusal : '';
+        }
+        return '';
+      })
+      .filter(Boolean);
+
+    return parts.join('');
+  }
+
+  if (content && typeof content === 'object') {
+    if (content.type === 'text' || content.type === 'output_text' || content.type === 'input_text') {
+      return typeof content.text === 'string' ? content.text : '';
+    }
+    if (content.type === 'refusal') {
+      return typeof content.refusal === 'string' ? content.refusal : '';
+    }
+  }
+
+  return '';
+}
+
 function transformResponse(axiosResponse) {
   const data = axiosResponse.data;
-  const content = data.choices?.[0]?.message?.content;
+  const choice = data.choices?.[0] || {};
+
+  // Prefer message.content, but fall back to audio transcript if present.
+  const message = choice.message || {};
+  const contentText = extractTextFromContent(message.content);
+  const audioTranscript = typeof message.audio?.transcript === 'string' ? message.audio.transcript : '';
+
+  const content = contentText || audioTranscript;
   const usage = data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 
   if (!content) {
@@ -266,4 +318,10 @@ module.exports = {
   name,
   complete,
   validate,
+  // Non-public hooks for unit tests
+  _private: {
+    buildRequest,
+    transformResponse,
+    extractTextFromContent,
+  },
 };
