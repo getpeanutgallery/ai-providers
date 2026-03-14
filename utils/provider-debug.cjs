@@ -230,6 +230,97 @@ function cleanUndefinedDeep(obj) {
   return out;
 }
 
+function buildProviderExchange(request, axiosResponse) {
+  return cleanUndefinedDeep({
+    providerRequest: request
+      ? {
+          method: request.method || 'POST',
+          url: request.url || null,
+          headers: request.headers || null,
+          body: request.body || null,
+        }
+      : undefined,
+    providerResponse: axiosResponse
+      ? {
+          status: axiosResponse.status || null,
+          headers: axiosResponse.headers || null,
+          body: axiosResponse.data || null,
+        }
+      : undefined,
+  });
+}
+
+function classifyFailure({ err, axiosResponse } = {}) {
+  const response = axiosResponse || err?.response;
+  const status = Number.isInteger(response?.status) ? response.status : undefined;
+  const code = typeof err?.code === 'string' ? err.code : undefined;
+
+  if (status === 400) return { failureCategory: 'invalid_request', failureCode: 'http_400', retryable: false, status };
+  if (status === 401 || status === 403) return { failureCategory: 'auth', failureCode: `http_${status}`, retryable: false, status };
+  if (status === 404) return { failureCategory: 'provider_response', failureCode: 'http_404', retryable: false, status };
+  if (status === 408) return { failureCategory: 'timeout', failureCode: 'http_408', retryable: true, status };
+  if (status === 409) return { failureCategory: 'provider_response', failureCode: 'http_409', retryable: true, status };
+  if (status === 422) return { failureCategory: 'invalid_request', failureCode: 'http_422', retryable: false, status };
+  if (status === 429) return { failureCategory: 'rate_limit', failureCode: 'http_429', retryable: true, status };
+  if (status >= 500) return { failureCategory: 'provider_response', failureCode: `http_${status}`, retryable: true, status };
+  if (status >= 400) return { failureCategory: 'provider_response', failureCode: `http_${status}`, retryable: false, status };
+
+  if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
+    return { failureCategory: 'timeout', failureCode: code.toLowerCase(), retryable: true };
+  }
+
+  if (
+    code === 'ECONNRESET' ||
+    code === 'ENOTFOUND' ||
+    code === 'EAI_AGAIN' ||
+    code === 'ECONNREFUSED' ||
+    code === 'EHOSTUNREACH' ||
+    code === 'ENETUNREACH'
+  ) {
+    return { failureCategory: 'network', failureCode: code.toLowerCase(), retryable: true };
+  }
+
+  return {
+    failureCategory: 'internal',
+    failureCode: code ? code.toLowerCase() : 'internal_error',
+    retryable: false,
+  };
+}
+
+function attachFailureMetadata(err, { provider, request, axiosResponse, failureCategory, failureCode, retryable, status } = {}) {
+  if (!err || typeof err !== 'object') return err;
+
+  const response = axiosResponse || err.response;
+  const exchange = buildProviderExchange(request, response);
+  if (exchange.providerRequest && err.providerRequest === undefined) err.providerRequest = exchange.providerRequest;
+  if (exchange.providerResponse && err.providerResponse === undefined) err.providerResponse = exchange.providerResponse;
+
+  if (provider && err.provider === undefined) err.provider = String(provider);
+  if (failureCategory !== undefined && err.failureCategory === undefined) err.failureCategory = failureCategory;
+  if (failureCode !== undefined && err.failureCode === undefined) err.failureCode = failureCode;
+  if (retryable !== undefined && err.retryable === undefined) err.retryable = !!retryable;
+  if (status !== undefined && err.status === undefined) err.status = status;
+
+  return err;
+}
+
+function createNoContentError({ provider, request, axiosResponse, message } = {}) {
+  const label = providerDisplayName(provider);
+  const err = new Error(message || `${label}: No content in response`);
+  err.name = `${label.replace(/\s+/g, '')}NoContentError`;
+  attachFailureMetadata(err, {
+    provider,
+    request,
+    axiosResponse,
+    failureCategory: 'invalid_response',
+    failureCode: 'no_content',
+    retryable: false,
+    status: axiosResponse?.status,
+  });
+  attachDebug(err, buildDebugPayload({ provider, request, axiosResponse }));
+  return err;
+}
+
 function buildDebugPayload({ provider, request, axiosResponse, axiosError, error, maxBodyChars } = {}) {
   const response = axiosResponse || axiosError?.response;
   const err = error || axiosError;
@@ -292,8 +383,11 @@ function attachDebug(err, debugPayload) {
 }
 
 function wrapTransportError(err, { provider, request, axiosResponse } = {}) {
+  const failure = classifyFailure({ err, axiosResponse });
+
   // If this already looks like a provider error with debug, just ensure request meta is present.
   if (err && typeof err === 'object' && err.debug) {
+    attachFailureMetadata(err, { provider, request, axiosResponse: axiosResponse || err.response, ...failure });
     attachDebug(err, buildDebugPayload({ provider, request, axiosError: err, axiosResponse }));
     return err;
   }
@@ -306,6 +400,8 @@ function wrapTransportError(err, { provider, request, axiosResponse } = {}) {
   // Preserve stack location when possible.
   if (err && err.stack) wrapped.stack = err.stack;
 
+  attachFailureMetadata(wrapped, { provider, request, axiosResponse: axiosResponse || err?.response, ...failure });
+
   // Attach debug. Do NOT attach raw axios error as `cause` (axios error may contain request config headers).
   attachDebug(wrapped, buildDebugPayload({ provider, request, axiosError: err, axiosResponse }));
 
@@ -314,6 +410,16 @@ function wrapTransportError(err, { provider, request, axiosResponse } = {}) {
 
 function attachResponseDebugAndRethrow(err, { provider, request, axiosResponse } = {}) {
   if (!err || typeof err !== 'object') throw err;
+
+  attachFailureMetadata(err, {
+    provider,
+    request,
+    axiosResponse,
+    failureCategory: err.failureCategory || 'invalid_response',
+    failureCode: err.failureCode || 'response_parse_error',
+    retryable: err.retryable !== undefined ? err.retryable : false,
+    status: axiosResponse?.status,
+  });
 
   // If already has debug, just enrich.
   attachDebug(err, buildDebugPayload({ provider, request, axiosResponse, error: err }));
@@ -330,8 +436,12 @@ module.exports = {
   pickRequestIdLikeHeaders,
   safeJsonSnippet,
   sanitizeRequestMeta,
+  buildProviderExchange,
   buildDebugPayload,
   attachDebug,
+  attachFailureMetadata,
+  classifyFailure,
+  createNoContentError,
   wrapTransportError,
   attachResponseDebugAndRethrow,
 };

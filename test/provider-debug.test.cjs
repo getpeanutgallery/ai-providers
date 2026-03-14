@@ -5,6 +5,8 @@ const {
   buildDebugPayload,
   attachDebug,
   sanitizeUrl,
+  classifyFailure,
+  buildProviderExchange,
 } = require('../utils/provider-debug.cjs');
 
 test('provider-debug: sanitizeUrl redacts common secret query params', () => {
@@ -106,6 +108,49 @@ test('provider-debug: attachDebug preserves existing debug.response when incomin
   assert.equal(err.debug.request.model, 'test-model');
 });
 
+test('provider-debug: classifyFailure maps common transport cases into stable categories', () => {
+  assert.deepEqual(classifyFailure({ err: { response: { status: 401 } } }), {
+    failureCategory: 'auth',
+    failureCode: 'http_401',
+    retryable: false,
+    status: 401,
+  });
+
+  assert.deepEqual(classifyFailure({ err: { response: { status: 429 } } }), {
+    failureCategory: 'rate_limit',
+    failureCode: 'http_429',
+    retryable: true,
+    status: 429,
+  });
+
+  assert.deepEqual(classifyFailure({ err: { code: 'ECONNRESET' } }), {
+    failureCategory: 'network',
+    failureCode: 'econnreset',
+    retryable: true,
+  });
+});
+
+test('provider-debug: buildProviderExchange preserves raw request/response for replay-safe capture', () => {
+  const exchange = buildProviderExchange(
+    {
+      method: 'POST',
+      url: 'https://api.openai.com/v1/chat/completions',
+      headers: { Authorization: 'Bearer SECRET', 'Content-Type': 'application/json' },
+      body: { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hello' }] },
+    },
+    {
+      status: 200,
+      headers: { 'x-request-id': 'req_123' },
+      data: { choices: [{ message: { content: 'hi' } }] },
+    }
+  );
+
+  assert.equal(exchange.providerRequest.method, 'POST');
+  assert.equal(exchange.providerRequest.url, 'https://api.openai.com/v1/chat/completions');
+  assert.equal(exchange.providerResponse.status, 200);
+  assert.equal(exchange.providerResponse.body.choices[0].message.content, 'hi');
+});
+
 test('providers: openai.complete wraps axios transport error with sanitized debug', async () => {
   const axiosPath = require.resolve('axios');
   const realAxios = require(axiosPath);
@@ -159,6 +204,96 @@ test('providers: openai.complete wraps axios transport error with sanitized debu
   }
 });
 
+test('providers: openai.complete returns raw providerRequest/providerResponse on success', async () => {
+  const axiosPath = require.resolve('axios');
+  const realAxios = require(axiosPath);
+
+  const oldNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'development';
+
+  try {
+    const axiosStub = async () => ({
+      status: 200,
+      headers: { 'x-request-id': 'req_openai_ok' },
+      data: {
+        choices: [{ message: { content: 'hello world' } }],
+        usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
+      },
+    });
+
+    require.cache[axiosPath].exports = axiosStub;
+    delete require.cache[require.resolve('../providers/openai.cjs')];
+
+    const provider = require('../providers/openai.cjs');
+    const result = await provider.complete({
+      prompt: 'hello',
+      model: 'gpt-4o-mini',
+      apiKey: 'sk-THIS_SHOULD_NOT_LEAK',
+    });
+
+    assert.equal(result.content, 'hello world');
+    assert.deepEqual(result.usage, { input: 11, output: 7, total: 18 });
+    assert.equal(result.providerRequest.method, 'POST');
+    assert.equal(result.providerRequest.body.model, 'gpt-4o-mini');
+    assert.equal(result.providerResponse.status, 200);
+    assert.equal(result.providerResponse.body.choices[0].message.content, 'hello world');
+  } finally {
+    require.cache[axiosPath].exports = realAxios;
+    delete require.cache[require.resolve('../providers/openai.cjs')];
+    process.env.NODE_ENV = oldNodeEnv;
+  }
+});
+
+test('providers: anthropic.complete classifies no-content responses for machine routing', async () => {
+  const axiosPath = require.resolve('axios');
+  const realAxios = require(axiosPath);
+
+  const oldNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'development';
+
+  try {
+    const axiosStub = async () => ({
+      status: 200,
+      headers: { 'x-request-id': 'req_anthropic_empty' },
+      data: {
+        id: 'msg_123',
+        content: [],
+        usage: { input_tokens: 3, output_tokens: 0 },
+      },
+    });
+
+    require.cache[axiosPath].exports = axiosStub;
+    delete require.cache[require.resolve('../providers/anthropic.cjs')];
+
+    const provider = require('../providers/anthropic.cjs');
+
+    await assert.rejects(
+      () =>
+        provider.complete({
+          prompt: 'hello',
+          model: 'claude-3-5-sonnet-latest',
+          apiKey: 'sk-ant-THIS_SHOULD_NOT_LEAK',
+        }),
+      (err) => {
+        assert.equal(err.name, 'AnthropicNoContentError');
+        assert.equal(err.failureCategory, 'invalid_response');
+        assert.equal(err.failureCode, 'no_content');
+        assert.equal(err.retryable, false);
+        assert.equal(err.provider, 'anthropic');
+        assert.equal(err.providerResponse.status, 200);
+        assert.ok(err.debug);
+        assert.equal(err.debug.provider, 'anthropic');
+        assert.ok(!JSON.stringify(err.debug).includes('THIS_SHOULD_NOT_LEAK'));
+        return true;
+      }
+    );
+  } finally {
+    require.cache[axiosPath].exports = realAxios;
+    delete require.cache[require.resolve('../providers/anthropic.cjs')];
+    process.env.NODE_ENV = oldNodeEnv;
+  }
+});
+
 test('providers: gemini.complete wraps axios transport error and redacts api key in request URL', async () => {
   const axiosPath = require.resolve('axios');
   const realAxios = require(axiosPath);
@@ -197,6 +332,11 @@ test('providers: gemini.complete wraps axios transport error and redacts api key
         assert.ok(err.debug);
         assert.equal(err.debug.provider, 'gemini');
         assert.equal(err.debug.response.status, 429);
+        assert.equal(err.failureCategory, 'rate_limit');
+        assert.equal(err.failureCode, 'http_429');
+        assert.equal(err.retryable, true);
+        assert.ok(err.providerRequest);
+        assert.equal(err.providerResponse.status, 429);
         assert.ok(!err.debug.request.url.includes('AIzaSHOULD_NOT_LEAK'));
         assert.ok(err.debug.request.url.includes('key'));
         assert.ok(!JSON.stringify(err.debug).includes('SENSITIVE_PROMPT_TEXT'));

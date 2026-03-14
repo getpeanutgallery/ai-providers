@@ -29,6 +29,8 @@ const {
   sanitizeRequestMeta,
   buildDebugPayload,
   attachDebug,
+  buildProviderExchange,
+  createNoContentError,
   wrapTransportError: wrapTransportErrorShared,
 } = require('../utils/provider-debug.cjs');
 
@@ -141,6 +143,9 @@ function buildRequest(options) {
   if (providerOptions.maxTokens) {
     requestBody.max_tokens = providerOptions.maxTokens;
   }
+  if (providerOptions.reasoning && typeof providerOptions.reasoning === 'object' && !Array.isArray(providerOptions.reasoning)) {
+    requestBody.reasoning = providerOptions.reasoning;
+  }
 
   if (providerOptions.siteUrl) {
     requestBody.site_url = providerOptions.siteUrl;
@@ -220,10 +225,15 @@ function transformResponse(axiosResponse, request) {
 
   const content = contentText || audioTranscript;
   const usage = data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const exchange = buildProviderExchange(request, axiosResponse);
 
   if (!content) {
-    const err = new Error('OpenRouter: No content in response');
-    err.name = 'OpenRouterNoContentError';
+    const err = createNoContentError({
+      provider: name,
+      request,
+      axiosResponse,
+      message: 'OpenRouter: No content in response',
+    });
     attachDebug(err, buildDebugPayload({ provider: name, request, axiosResponse, maxBodyChars: DEBUG_BODY_MAX_CHARS }));
     throw err;
   }
@@ -235,6 +245,7 @@ function transformResponse(axiosResponse, request) {
       output: usage.completion_tokens || 0,
       total: usage.total_tokens || 0,
     },
+    ...exchange,
   };
 }
 

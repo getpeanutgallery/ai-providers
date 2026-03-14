@@ -75,6 +75,9 @@ const fs = require('fs');
  * @property {Object} [usage] - Token usage info
  * @property {number} [usage.input] - Input tokens
  * @property {number} [usage.output] - Output tokens
+ * @property {number} [usage.total] - Total tokens when the provider supplies it
+ * @property {Object} [providerRequest] - Canonical raw request snapshot for replay/debug capture
+ * @property {Object} [providerResponse] - Raw provider response snapshot for replay/debug capture
  */
 
 /**

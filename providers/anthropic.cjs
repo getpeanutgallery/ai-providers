@@ -11,7 +11,12 @@
 const axios = require('axios');
 const path = require('path');
 const { processAttachment } = require('../utils/file-utils.cjs');
-const { wrapTransportError, attachResponseDebugAndRethrow } = require('../utils/provider-debug.cjs');
+const {
+  wrapTransportError,
+  attachResponseDebugAndRethrow,
+  buildProviderExchange,
+  createNoContentError,
+} = require('../utils/provider-debug.cjs');
 
 /**
  * Provider name identifier
@@ -126,13 +131,14 @@ async function buildRequest(options) {
  * @param {Object} axiosResponse - Axios response object
  * @returns {Object} { content, usage: { input, output, total } }
  */
-function transformResponse(axiosResponse) {
+function transformResponse(axiosResponse, request) {
   const data = axiosResponse.data;
   const content = data.content?.[0]?.text;
   const usage = data.usage || { input_tokens: 0, output_tokens: 0 };
+  const exchange = buildProviderExchange(request, axiosResponse);
 
   if (!content) {
-    throw new Error('Anthropic: No content in response');
+    throw createNoContentError({ provider: name, request, axiosResponse, message: 'Anthropic: No content in response' });
   }
 
   return {
@@ -141,7 +147,8 @@ function transformResponse(axiosResponse) {
       input: usage.input_tokens || 0,
       output: usage.output_tokens || 0,
       total: (usage.input_tokens || 0) + (usage.output_tokens || 0)
-    }
+    },
+    ...exchange,
   };
 }
 
@@ -159,7 +166,7 @@ async function runRequest(request) {
     });
 
     try {
-      return transformResponse(response);
+      return transformResponse(response, request);
     } catch (err) {
       attachResponseDebugAndRethrow(err, { provider: name, request, axiosResponse: response });
     }

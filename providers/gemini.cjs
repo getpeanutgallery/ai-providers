@@ -11,7 +11,12 @@
 const axios = require('axios');
 const path = require('path');
 const { processAttachment } = require('../utils/file-utils.cjs');
-const { wrapTransportError, attachResponseDebugAndRethrow } = require('../utils/provider-debug.cjs');
+const {
+  wrapTransportError,
+  attachResponseDebugAndRethrow,
+  buildProviderExchange,
+  createNoContentError,
+} = require('../utils/provider-debug.cjs');
 
 /**
  * Provider name identifier
@@ -119,12 +124,13 @@ async function buildRequest(options) {
  * @param {string} originalPrompt - Original prompt for token estimation
  * @returns {Object} { content, usage: { input, output, total } }
  */
-function transformResponse(axiosResponse, originalPrompt) {
+function transformResponse(axiosResponse, originalPrompt, request) {
   const data = axiosResponse.data;
   const candidates = data.candidates;
+  const exchange = buildProviderExchange(request, axiosResponse);
   
   if (!candidates || !candidates[0]?.content?.parts?.[0]?.text) {
-    throw new Error('Gemini: No content in response');
+    throw createNoContentError({ provider: name, request, axiosResponse, message: 'Gemini: No content in response' });
   }
   
   const content = candidates[0].content.parts[0].text;
@@ -136,7 +142,8 @@ function transformResponse(axiosResponse, originalPrompt) {
       input: usageMetadata.promptTokenCount || estimateTokens(originalPrompt),
       output: usageMetadata.candidatesTokenCount || estimateTokens(content),
       total: (usageMetadata.promptTokenCount || 0) + (usageMetadata.candidatesTokenCount || 0)
-    }
+    },
+    ...exchange,
   };
 }
 
@@ -155,7 +162,7 @@ async function runRequest(request, originalPrompt) {
     });
 
     try {
-      return transformResponse(response, originalPrompt);
+      return transformResponse(response, originalPrompt, request);
     } catch (err) {
       attachResponseDebugAndRethrow(err, { provider: name, request, axiosResponse: response });
     }

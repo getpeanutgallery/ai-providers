@@ -11,7 +11,12 @@
 const axios = require('axios');
 const path = require('path');
 const { processAttachment } = require('../utils/file-utils.cjs');
-const { wrapTransportError, attachResponseDebugAndRethrow } = require('../utils/provider-debug.cjs');
+const {
+  wrapTransportError,
+  attachResponseDebugAndRethrow,
+  buildProviderExchange,
+  createNoContentError,
+} = require('../utils/provider-debug.cjs');
 
 /**
  * Provider name identifier
@@ -117,13 +122,14 @@ async function buildRequest(options) {
  * @param {Object} axiosResponse - Axios response object
  * @returns {Object} { content, usage: { input, output, total } }
  */
-function transformResponse(axiosResponse) {
+function transformResponse(axiosResponse, request) {
   const data = axiosResponse.data;
   const content = data.choices?.[0]?.message?.content;
   const usage = data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const exchange = buildProviderExchange(request, axiosResponse);
 
   if (!content) {
-    throw new Error('OpenAI: No content in response');
+    throw createNoContentError({ provider: name, request, axiosResponse, message: 'OpenAI: No content in response' });
   }
 
   return {
@@ -132,7 +138,8 @@ function transformResponse(axiosResponse) {
       input: usage.prompt_tokens || 0,
       output: usage.completion_tokens || 0,
       total: usage.total_tokens || 0
-    }
+    },
+    ...exchange,
   };
 }
 
@@ -150,7 +157,7 @@ async function runRequest(request) {
     });
 
     try {
-      return transformResponse(response);
+      return transformResponse(response, request);
     } catch (err) {
       attachResponseDebugAndRethrow(err, { provider: name, request, axiosResponse: response });
     }
