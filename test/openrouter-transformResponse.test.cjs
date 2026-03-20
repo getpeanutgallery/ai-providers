@@ -209,3 +209,63 @@ test('openrouter.wrapTransportError: preserves existing debug.response when new 
   // It should still enrich request meta.
   assert.equal(wrapped.debug.request.model, 'test-model');
 });
+
+test('openrouter.getTransportTimeoutMs: prefers provider option, then env, then default', () => {
+  const oldEnv = process.env.OPENROUTER_TIMEOUT_MS;
+
+  try {
+    delete process.env.OPENROUTER_TIMEOUT_MS;
+    assert.equal(provider._private.getTransportTimeoutMs({}), 120000);
+
+    process.env.OPENROUTER_TIMEOUT_MS = '45000';
+    assert.equal(provider._private.getTransportTimeoutMs({}), 45000);
+
+    assert.equal(
+      provider._private.getTransportTimeoutMs({ options: { timeoutMs: 9000 } }),
+      9000
+    );
+  } finally {
+    if (oldEnv === undefined) delete process.env.OPENROUTER_TIMEOUT_MS;
+    else process.env.OPENROUTER_TIMEOUT_MS = oldEnv;
+  }
+});
+
+test('openrouter.runRequest: forwards resolved timeout to axios transport', async () => {
+  const axiosPath = require.resolve('axios');
+  const realAxios = require(axiosPath);
+  let seenConfig = null;
+
+  try {
+    const axiosStub = async (config) => {
+      seenConfig = config;
+      return {
+        status: 200,
+        headers: { 'x-request-id': 'req_timeout_cfg' },
+        data: {
+          choices: [{ message: { content: 'ok' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        },
+      };
+    };
+
+    require.cache[axiosPath].exports = axiosStub;
+    delete require.cache[require.resolve('../providers/openrouter.cjs')];
+    const freshProvider = require('../providers/openrouter.cjs');
+
+    const result = await freshProvider._private.runRequest(
+      {
+        method: 'POST',
+        url: 'https://openrouter.ai/api/v1/chat/completions',
+        headers: { Authorization: 'Bearer SECRET', 'Content-Type': 'application/json' },
+        body: { model: 'test-model', messages: [{ role: 'user', content: 'hi' }] },
+      },
+      { options: { timeoutMs: 7777 } }
+    );
+
+    assert.equal(result.content, 'ok');
+    assert.equal(seenConfig.timeout, 7777);
+  } finally {
+    require.cache[axiosPath].exports = realAxios;
+    delete require.cache[require.resolve('../providers/openrouter.cjs')];
+  }
+});

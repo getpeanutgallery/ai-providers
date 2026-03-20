@@ -35,9 +35,23 @@ const {
 } = require('../utils/provider-debug.cjs');
 
 const DEBUG_BODY_MAX_CHARS = DEFAULT_DEBUG_BODY_MAX_CHARS;
+const DEFAULT_TRANSPORT_TIMEOUT_MS = 120000;
 
 function wrapTransportError(err, request) {
   return wrapTransportErrorShared(err, { provider: name, request });
+}
+
+function getTransportTimeoutMs(options = {}) {
+  const providerTimeout = options?.options?.timeoutMs;
+  const envTimeout = process.env.OPENROUTER_TIMEOUT_MS;
+
+  const parseTimeout = (value) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    const num = Number(value);
+    return Number.isFinite(num) && num > 0 ? Math.floor(num) : undefined;
+  };
+
+  return parseTimeout(providerTimeout) ?? parseTimeout(envTimeout) ?? DEFAULT_TRANSPORT_TIMEOUT_MS;
 }
 
 /**
@@ -249,13 +263,14 @@ function transformResponse(axiosResponse, request) {
   };
 }
 
-async function runRequest(request) {
+async function runRequest(request, transportOptions = {}) {
   try {
     const response = await axios({
       method: request.method,
       url: request.url,
       headers: request.headers,
       data: request.body,
+      timeout: getTransportTimeoutMs(transportOptions),
     });
 
     return transformResponse(response, request);
@@ -268,8 +283,8 @@ async function runRequest(request) {
  * Create the real transport function (used by twin or direct)
  * @returns {Function} (request) => Promise<result>
  */
-function makeRealTransport() {
-  return async (request) => runRequest(request);
+function makeRealTransport(options) {
+  return async (request) => runRequest(request, options);
 }
 
 /**
@@ -313,7 +328,7 @@ async function complete(options) {
     const transport = createTwinTransport({
       mode,
       twinPack,
-      realTransport: makeRealTransport(),
+      realTransport: makeRealTransport(options),
       engineOptions: { normalizerOptions: { ignoreQuery: true } },
     });
 
@@ -326,7 +341,7 @@ async function complete(options) {
   }
 
   // Direct HTTP call
-  return await runRequest(request);
+  return await runRequest(request, options);
 }
 
 /**
@@ -369,5 +384,7 @@ module.exports = {
     buildDebugPayload,
     sanitizeRequestMeta,
     wrapTransportError,
+    getTransportTimeoutMs,
+    runRequest,
   },
 };
