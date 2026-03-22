@@ -9,6 +9,6 @@
   },
   "dependencies": {
     "axios": "^1.13.6",
-    "digital-twin-router": "git+ssh://git@github.com/getpeanutgallery/digital-twin-router.git#770313a"
+    "digital-twin-router": "git+ssh://git@github.com/getpeanutgallery/digital-twin-router.git#ab2c314"
   }
 }
